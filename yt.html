@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="x-ua-compatible" content="ie=edge">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <!-- 1.2.68: strict-origin-when-cross-origin laesst den Browser einen
+       echten Referer-Header (https://kenan1206.github.io) an YouTube schicken.
+       Ohne das wuerde Error 153 "Video player configuration error" fliegen. -->
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Kenan Player — Trailer</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      background: #000;
+      overflow: hidden;
+      font-family: sans-serif;
+    }
+    iframe, #player {
+      position: fixed;
+      top: 0; right: 0; bottom: 0; left: 0;
+      width: 100%; height: 100%;
+      border: 0;
+      background: #000;
+    }
+    #err {
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      text-align: center;
+      display: none;
+      max-width: 80%;
+    }
+    #err.show { display: block; }
+    #err svg { width: 64px; height: 64px; margin-bottom: 16px; }
+    #err h1 { font-size: 22px; font-weight: 700; margin: 0 0 12px; }
+    #err p { font-size: 14px; opacity: 0.7; margin: 0; line-height: 1.5; }
+    .hide { display: none !important; }
+  </style>
+</head>
+<body>
+  <iframe
+    id="player"
+    src="about:blank"
+    referrerpolicy="strict-origin-when-cross-origin"
+    allow="autoplay; encrypted-media; accelerometer; gyroscope; picture-in-picture"
+    allowfullscreen></iframe>
+
+  <div id="err">
+    <svg viewBox="0 0 24 24" fill="#FF0000">
+      <path d="M21.582,6.186c-0.23-0.86-0.908-1.538-1.768-1.768C18.254,4,12,4,12,4S5.746,4,4.186,4.418
+        c-0.86,0.23-1.538,0.908-1.768,1.768C2,7.746,2,12,2,12s0,4.254,0.418,5.814c0.23,0.86,0.908,1.538,1.768,1.768
+        C5.746,20,12,20,12,20s6.254,0,7.814-0.418c0.861-0.23,1.538-0.908,1.768-1.768C22,16.254,22,12,22,12S22,7.746,21.582,6.186z
+         M10,15.464V8.536L16,12L10,15.464z"/>
+    </svg>
+    <h1 id="err-title">Trailer can't play here</h1>
+    <p id="err-text">YouTube blocked this video for embedding. Please try another trailer.</p>
+  </div>
+
+  <script>
+    (function() {
+      'use strict';
+
+      // Parse video ID from URL: ?v=ID or ?key=ID or #v=ID
+      function getParam(name) {
+        var s = window.location.search.substring(1);
+        var pairs = s.split('&');
+        for (var i = 0; i < pairs.length; i++) {
+          var kv = pairs[i].split('=');
+          if (decodeURIComponent(kv[0]) === name) return decodeURIComponent(kv[1] || '');
+        }
+        return '';
+      }
+
+      var videoId = getParam('v') || getParam('key') || '';
+      // i18n via lang param
+      var lang = (getParam('lang') || 'en').slice(0, 2).toLowerCase();
+
+      // Try nocookie domain first (less restrictive)
+      var useFallbackDomain = false;
+      var iframe = document.getElementById('player');
+      var errBox = document.getElementById('err');
+
+      function buildSrc(vid, fallback) {
+        var domain = fallback ? 'www.youtube.com' : 'www.youtube-nocookie.com';
+        var origin = encodeURIComponent(window.location.origin);
+        var params = [
+          'autoplay=1', 'controls=1', 'rel=0', 'modestbranding=1',
+          'playsinline=1', 'iv_load_policy=3', 'fs=1', 'cc_load_policy=0',
+          'origin=' + origin, 'enablejsapi=1', 'widget_referrer=' + origin
+        ].join('&');
+        return 'https://' + domain + '/embed/' + encodeURIComponent(vid) + '?' + params;
+      }
+
+      function showError(msg) {
+        iframe.classList.add('hide');
+        errBox.classList.add('show');
+      }
+
+      function loadVideo() {
+        if (!videoId) {
+          showError();
+          return;
+        }
+        iframe.src = buildSrc(videoId, useFallbackDomain);
+      }
+
+      // YouTube IFrame API postMessage error detection
+      window.addEventListener('message', function(ev) {
+        var origin = ev.origin || '';
+        if (origin.indexOf('youtube.com') < 0 && origin.indexOf('youtube-nocookie.com') < 0) return;
+
+        var payload = ev.data;
+        if (typeof payload === 'string') {
+          try { payload = JSON.parse(payload); } catch (e) { return; }
+        }
+        if (!payload || typeof payload !== 'object') return;
+
+        var errorCode = null;
+        if (payload.info && typeof payload.info === 'object' && 'errorCode' in payload.info) {
+          errorCode = payload.info.errorCode;
+        } else if (payload.event === 'onError') {
+          errorCode = payload.info;
+        }
+
+        if (errorCode === 100 || errorCode === 101 || errorCode === 150 || errorCode === 153) {
+          if (!useFallbackDomain) {
+            // Try main YouTube domain
+            useFallbackDomain = true;
+            loadVideo();
+          } else {
+            // Notify parent (the app overlay)
+            try {
+              window.parent.postMessage({
+                event: 'kp-trailer-failed',
+                videoId: videoId,
+                errorCode: errorCode
+              }, '*');
+            } catch (e) { /* */ }
+            showError();
+          }
+        }
+      });
+
+      // After iframe load, send the YouTube IFrame API "listening" handshake
+      // so YT will start sending us state/error events via postMessage.
+      iframe.addEventListener('load', function() {
+        try {
+          iframe.contentWindow.postMessage(
+            JSON.stringify({ event: 'listening', id: videoId, channel: 'widget' }), '*'
+          );
+          iframe.contentWindow.postMessage(
+            JSON.stringify({ event: 'command', func: 'addEventListener', args: ['onError'], id: videoId, channel: 'widget' }), '*'
+          );
+          iframe.contentWindow.postMessage(
+            JSON.stringify({ event: 'command', func: 'addEventListener', args: ['onStateChange'], id: videoId, channel: 'widget' }), '*'
+          );
+        } catch (e) { /* */ }
+      });
+
+      // BACK / ESC -> notify parent
+      window.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' || e.keyCode === 461 /* webOS BACK */) {
+          try {
+            window.parent.postMessage({ event: 'kp-trailer-back' }, '*');
+          } catch (err) { /* */ }
+        }
+      });
+
+      // i18n texts
+      var labels = {
+        tr: { t: 'Fragman burada oynatılamıyor', p: 'Video sahibi yalnızca YouTube üzerinde oynatılmasına izin veriyor.' },
+        en: { t: 'Trailer cannot be played here', p: 'The video owner only allows playback on YouTube itself.' },
+        de: { t: 'Trailer kann hier nicht abgespielt werden', p: 'Der Video-Anbieter erlaubt die Wiedergabe nur auf YouTube selbst.' },
+        fr: { t: "La bande-annonce ne peut pas être lue ici", p: "Le propriétaire de la vidéo n'autorise la lecture que sur YouTube." },
+        es: { t: 'El tráiler no se puede reproducir aquí', p: 'El propietario del video solo permite la reproducción en YouTube.' },
+        it: { t: 'Il trailer non può essere riprodotto qui', p: 'Il proprietario consente la riproduzione solo su YouTube.' },
+        pt: { t: 'Trailer não pode ser reproduzido aqui', p: 'O proprietário permite reprodução apenas no YouTube.' },
+        ar: { t: 'لا يمكن تشغيل العرض هنا', p: 'مالك الفيديو يسمح بالتشغيل فقط على YouTube.' },
+        pl: { t: 'Zwiastun nie może być odtworzony tutaj', p: 'Właściciel zezwala na odtwarzanie tylko na YouTube.' },
+        nl: { t: 'Trailer kan hier niet worden afgespeeld', p: 'De eigenaar staat afspelen alleen op YouTube toe.' }
+      };
+      var lbl = labels[lang] || labels.en;
+      document.getElementById('err-title').textContent = lbl.t;
+      document.getElementById('err-text').textContent = lbl.p;
+
+      loadVideo();
+    })();
+  </script>
+</body>
+</html>
