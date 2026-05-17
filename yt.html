@@ -107,7 +107,7 @@
         iframe.src = buildSrc(videoId, useFallbackDomain);
       }
 
-      // YouTube IFrame API postMessage error detection
+      // YouTube IFrame API postMessage error detection + state forwarding
       window.addEventListener('message', function(ev) {
         var origin = ev.origin || '';
         if (origin.indexOf('youtube.com') < 0 && origin.indexOf('youtube-nocookie.com') < 0) return;
@@ -117,6 +117,25 @@
           try { payload = JSON.parse(payload); } catch (e) { return; }
         }
         if (!payload || typeof payload !== 'object') return;
+
+        // Forward state info to parent so it knows the trailer is actually playing
+        // (prevents the parent's silence-detector from advancing to next stage).
+        var ytEvent = payload.event;
+        var ytInfo = payload.info;
+
+        if (ytEvent === 'onReady' || ytEvent === 'initialDelivery') {
+          try { window.parent.postMessage({ event: 'kp-trailer-ready' }, '*'); } catch (e) {}
+        }
+        if (ytEvent === 'onStateChange' || (ytEvent === 'infoDelivery' && ytInfo && typeof ytInfo === 'object' && 'playerState' in ytInfo)) {
+          var state = (ytEvent === 'onStateChange') ? ytInfo : ytInfo.playerState;
+          // 1 = playing, 3 = buffering — both mean "video is working"
+          if (state === 1 || state === 3 || state === 2 /* paused but loaded */) {
+            try { window.parent.postMessage({ event: 'kp-trailer-playing', state: state }, '*'); } catch (e) {}
+          }
+          if (state === 0 /* ended */) {
+            try { window.parent.postMessage({ event: 'kp-trailer-ended' }, '*'); } catch (e) {}
+          }
+        }
 
         var errorCode = null;
         if (payload.info && typeof payload.info === 'object' && 'errorCode' in payload.info) {
