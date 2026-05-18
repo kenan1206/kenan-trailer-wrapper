@@ -108,8 +108,47 @@
       }
 
       // YouTube IFrame API postMessage error detection + state forwarding
+      // 1.2.111: currentTime-Tracking + Parent-Commands (play/pause/seekRel)
+      var currentTime = 0;
+      var duration = 0;
+      var lastPlayerState = 2; // default: paused — wird durch onStateChange aktualisiert
+
       window.addEventListener('message', function(ev) {
         var origin = ev.origin || '';
+
+        // ── 1.2.111: Commands vom Parent (App-Remote) ──────────────────────
+        // Parent darf von beliebigem Origin senden (file:// auf webOS).
+        // Wir akzeptieren NUR den Event-Namen `kp-trailer-cmd`.
+        var payload0 = ev.data;
+        if (typeof payload0 === 'string') {
+          try { payload0 = JSON.parse(payload0); } catch (e) { /* ok, kein JSON */ }
+        }
+        if (payload0 && typeof payload0 === 'object' && payload0.event === 'kp-trailer-cmd') {
+          var cmd = payload0.cmd;
+          try {
+            if (cmd === 'play') {
+              iframe.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'playVideo', args: [] }), '*');
+            } else if (cmd === 'pause') {
+              iframe.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }), '*');
+            } else if (cmd === 'toggle') {
+              // We don't know the exact state — try pause first; if it was already paused, YT ignores.
+              // Better: use last known state.
+              if (lastPlayerState === 1 /* playing */) {
+                iframe.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }), '*');
+              } else {
+                iframe.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'playVideo', args: [] }), '*');
+              }
+            } else if (cmd === 'seekRel') {
+              var delta = parseFloat(payload0.value) || 0;
+              var target = Math.max(0, currentTime + delta);
+              if (duration > 0) target = Math.min(target, duration - 0.5);
+              iframe.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [target, true] }), '*');
+            }
+          } catch (e) { /* */ }
+          return;
+        }
+
+        // ── Nachrichten von YouTube auswerten ─────────────────────────────
         if (origin.indexOf('youtube.com') < 0 && origin.indexOf('youtube-nocookie.com') < 0) return;
 
         var payload = ev.data;
@@ -123,11 +162,18 @@
         var ytEvent = payload.event;
         var ytInfo = payload.info;
 
+        // 1.2.111: currentTime + duration aus infoDelivery extrahieren
+        if (ytInfo && typeof ytInfo === 'object') {
+          if (typeof ytInfo.currentTime === 'number') currentTime = ytInfo.currentTime;
+          if (typeof ytInfo.duration === 'number' && ytInfo.duration > 0) duration = ytInfo.duration;
+        }
+
         if (ytEvent === 'onReady' || ytEvent === 'initialDelivery') {
           try { window.parent.postMessage({ event: 'kp-trailer-ready' }, '*'); } catch (e) {}
         }
         if (ytEvent === 'onStateChange' || (ytEvent === 'infoDelivery' && ytInfo && typeof ytInfo === 'object' && 'playerState' in ytInfo)) {
           var state = (ytEvent === 'onStateChange') ? ytInfo : ytInfo.playerState;
+          lastPlayerState = state;  // 1.2.111: für toggle-cmd
           // 1 = playing, 3 = buffering — both mean "video is working"
           if (state === 1 || state === 3 || state === 2 /* paused but loaded */) {
             try { window.parent.postMessage({ event: 'kp-trailer-playing', state: state }, '*'); } catch (e) {}
@@ -162,6 +208,9 @@
           }
         }
       });
+
+      // 1.2.111: lastPlayerState wird für toggle-cmd benötigt (default: paused)
+      // (Variable wurde oben deklariert; durch onStateChange/infoDelivery aktualisiert)
 
       // After iframe load, send the YouTube IFrame API "listening" handshake
       // so YT will start sending us state/error events via postMessage.
